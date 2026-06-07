@@ -1,22 +1,22 @@
+import os
 import fcntl
 import random
 import struct
 import asyncio
-import aiofiles.threadpool
 import serial_asyncio
 import meshtastic.mesh_pb2
 
 
 # open_tun - open an async TUN file
 def open_tun(name):
-    tun = open("/dev/net/tun", "r+b", buffering=0)
+    tun_fd = os.open("/dev/net/tun", os.O_RDWR)
     LINUX_IFF_TUN = 0x0001
     LINUX_IFF_NO_PI = 0x1000
     LINUX_TUNSETIFF = 0x400454CA
     flags = LINUX_IFF_TUN | LINUX_IFF_NO_PI
     ifs = struct.pack("16sH22s", bytes(name, encoding="ascii"), flags, b"")
-    fcntl.ioctl(tun, LINUX_TUNSETIFF, ifs)
-    return aiofiles.threadpool.wrap(tun)
+    fcntl.ioctl(tun_fd, LINUX_TUNSETIFF, ifs)
+    return tun_fd 
 
 
 # wakeup_packet - generate a wake up packet for the radio
@@ -28,8 +28,8 @@ def wakeup_packet():
 
 # RadioTx - relay IP packets to the Mesh
 class RadioTx():
-    def __init__(self, tun, mesh_writer):
-        self.tun = tun
+    def __init__(self, tun_fd, mesh_writer):
+        self.tun_fd = tun_fd
         self.mesh_writer = mesh_writer
         self.packet_id = random.randint(0, 2**32 - 1)
 
@@ -43,7 +43,7 @@ class RadioTx():
         print("starting tx_packets")
         while True:
             print("waiting for IP!")
-            header = await self.tun.read(20)
+            header = await asyncio.to_thread(os.read, self.tun_fd, 20)
             total_length = struct.unpack(">H", header[2:4])[0]
             protocol = header[9]
             source_address = struct.unpack(">BBBB", header[12:16])
@@ -57,7 +57,7 @@ class RadioTx():
             elif destination_address[0] == 224 and (destination_address[3] == 251 or destination_address[3] == 252):
                 print("dropping mdns")
             else:
-                rest = await self.tun.read(total_length - 20)
+                rest = await asyncio.to_thread(os.read, self.tun_fd, total_length - 20)
                 await self.send_packet(header + rest)
 
 
@@ -81,8 +81,8 @@ class RadioTx():
 
 # RadioRx - relay IP packets from the Mesh to TUN
 class RadioRx():
-    def __init__(self, tun, mesh_reader):
-        self.tun = tun
+    def __init__(self, tun_fd, mesh_reader):
+        self.tun_fd = tun_fd
         self.mesh_reader = mesh_reader
 
 
@@ -108,14 +108,50 @@ class RadioRx():
             # which may overflow the buffer at some point
             print("waiting for FromRadio!")
             packet = await self.read_packet()
+            print(packet)
+            await self.handle_packet(packet)
 
+
+    # handle_packet - handle a packet coming from the Mesh
+    async def handle_packet(self, packet):
+        # packet is not intended for us
+        if len(packet.packet.decoded.payload) == 0:
+            print("packet doesn't have a decoded payload, ignoring")
+            return 
+
+        # ignore DMs 
+        if packet.packet.to != (2**32) - 1:
+            print(f"packet is a direct message, ignoring")
+            return
+
+        # ignore non-primary channel packets
+        if packet.packet.channel != 0:
+            print("packet wasn't sent on the primary channel, ignoring")
+            return
+
+
+        # ignore packets on the wrong portnum
+        if packet.packet.decoded.portnum != 1:
+            print(f"packet has the wrong portnum: {packet.packet.decoded.portnum}, ignoring")
+            return
+        
+        # ignore packets which are not IP
+        if not (packet.packet.decoded.payload[0] & 0xf0 == 0x40):
+            print(f"packet is not ip, ignoring")
+            return
+
+
+        # all good at this point
+        print("packet is good, relaying to TUN")
+        await asyncio.to_thread(os.write, self.tun_fd, packet.packet.decoded.payload)
+        
 
 async def main(loop):
     # init
     random.seed(None)
     mesh_reader, mesh_writer = await serial_asyncio.open_serial_connection(url="/dev/ttyUSB0", baudrate=115200)
     print("serial connection opened")
-    tun = open_tun("tun-tastic")
+    tun_fd = open_tun("tun-tastic")
     print("tun opened")
     
     # waking up
@@ -124,8 +160,8 @@ async def main(loop):
     await mesh_writer.drain() 
     await asyncio.sleep(0.5)
 
-    tx = RadioTx(tun, mesh_writer)
-    rx = RadioRx(tun, mesh_reader)
+    tx = RadioTx(tun_fd, mesh_writer)
+    rx = RadioRx(tun_fd, mesh_reader)
 
     await asyncio.gather(rx.rx_packets(), tx.tx_packets())
 
