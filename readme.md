@@ -1,5 +1,5 @@
 # Pytastic
-This is program is intended to provide a Meshtastic-IP bridge using TUN. It expects a connected Meshtastic node on `/dev/ttyUSB0`.
+This program is intended to provide a Meshtastic-IP bridge using TUN. It expects a connected Meshtastic node on `/dev/ttyUSB0`.
 
 # Setup
 ## Dependencies
