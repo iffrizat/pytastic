@@ -43,28 +43,21 @@ class RadioTx():
         print("starting tx_packets")
         while True:
             print("waiting for IP!")
-            header = bytes()
-            while len(header) < 20:
-                header += await asyncio.to_thread(os.read, self.tun_fd, 20)
-
-            total_length = struct.unpack(">H", header[2:4])[0]
-            protocol = header[9]
-            source_address = struct.unpack(">BBBB", header[12:16])
-            destination_address = struct.unpack(">BBBB", header[16:20])
-            print(header.hex())
+            ip_packet = await asyncio.to_thread(os.read, self.tun_fd, 512)
+            total_length = struct.unpack(">H", ip_packet[2:4])[0]
+            protocol = ip_packet[9]
+            source_address = struct.unpack(">BBBB", ip_packet[12:16])
+            destination_address = struct.unpack(">BBBB", ip_packet[16:20])
             debug_payload = f"got ip packet: {source_address} -> {destination_address}, proto {protocol}, {total_length} bytes, packet id gonna be {self.packet_id}"
             print(debug_payload)
+
             if total_length > 200:
                 print("packet too long, dropping")
             # heuristic to remove annoying packets that come up every time the device file is opened
             elif destination_address[0] == 224 and (destination_address[3] == 251 or destination_address[3] == 252):
                 print("dropping mdns")
             else:
-                rest = bytes()
-                while len(rest) < total_length - 20:
-                    rest += await asyncio.to_thread(os.read, self.tun_fd, total_length - 20)
-
-                await self.send_packet(header + rest)
+                await self.send_packet(ip_packet)
 
 
     # send_packet - send a Meshtastic packet on primary channel 
