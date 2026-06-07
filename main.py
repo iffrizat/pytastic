@@ -43,7 +43,10 @@ class RadioTx():
         print("starting tx_packets")
         while True:
             print("waiting for IP!")
-            header = await asyncio.to_thread(os.read, self.tun_fd, 20)
+            header = bytes()
+            while len(header) < 20:
+                header += await asyncio.to_thread(os.read, self.tun_fd, 20)
+
             total_length = struct.unpack(">H", header[2:4])[0]
             protocol = header[9]
             source_address = struct.unpack(">BBBB", header[12:16])
@@ -57,7 +60,10 @@ class RadioTx():
             elif destination_address[0] == 224 and (destination_address[3] == 251 or destination_address[3] == 252):
                 print("dropping mdns")
             else:
-                rest = await asyncio.to_thread(os.read, self.tun_fd, total_length - 20)
+                rest = bytes()
+                while len(rest) < total_length - 20:
+                    rest += await asyncio.to_thread(os.read, self.tun_fd, total_length - 20)
+
                 await self.send_packet(header + rest)
 
 
@@ -143,7 +149,9 @@ class RadioRx():
 
         # all good at this point
         print("packet is good, relaying to TUN")
-        await asyncio.to_thread(os.write, self.tun_fd, packet.packet.decoded.payload)
+        written = 0
+        while written < len(packet.packet.decoded.payload):
+            written += await asyncio.to_thread(os.write, self.tun_fd, packet.packet.decoded.payload[written:])
         
 
 async def main(loop):
