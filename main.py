@@ -26,6 +26,15 @@ def wakeup_packet():
     return packet
 
 
+# ip_info - get quick info about an IP packet
+def ip_info(ip_packet):
+        total_length = struct.unpack(">H", ip_packet[2:4])[0]
+        protocol = ip_packet[9]
+        source_address = struct.unpack(">BBBB", ip_packet[12:16])
+        destination_address = struct.unpack(">BBBB", ip_packet[16:20])
+        return f"IP packet: {source_address} -> {destination_address}, proto {protocol}, {total_length} bytes"
+
+
 # RadioTx - relay IP packets to the Mesh
 class RadioTx():
     def __init__(self, tun_fd, mesh_writer):
@@ -38,25 +47,21 @@ class RadioTx():
     async def clear_to_send(self):
         await asyncio.sleep(3)
 
+
     # tx_packets - endless loop of reading from TUN and writing to Mesh
     async def tx_packets(self):
         print("starting tx_packets")
         while True:
-            print("waiting for IP!")
             ip_packet = await asyncio.to_thread(os.read, self.tun_fd, 512)
             total_length = struct.unpack(">H", ip_packet[2:4])[0]
-            protocol = ip_packet[9]
-            source_address = struct.unpack(">BBBB", ip_packet[12:16])
             destination_address = struct.unpack(">BBBB", ip_packet[16:20])
-            debug_payload = f"got ip packet: {source_address} -> {destination_address}, proto {protocol}, {total_length} bytes, packet id gonna be {self.packet_id}"
-            print(debug_payload)
-
             if total_length > 200:
                 print("packet too long, dropping")
             # heuristic to remove annoying packets that come up every time the device file is opened
             elif destination_address[0] == 224 and (destination_address[3] == 251 or destination_address[3] == 252):
                 print("dropping mdns")
             else:
+                print(f"[TUN -> MESH] {ip_info(ip_packet)}")
                 await self.send_packet(ip_packet)
 
 
@@ -68,11 +73,10 @@ class RadioTx():
         await self.clear_to_send()
 
         # TODO: portnum should be 33 
-        decoded = meshtastic.mesh_pb2.Data(portnum=1, payload=payload, want_response=True)
+        decoded = meshtastic.mesh_pb2.Data(portnum=1, payload=payload, want_response=False)
         mesh_packet = meshtastic.mesh_pb2.MeshPacket(to=(2**32 - 1), channel=0, id=self.packet_id, decoded=decoded)
         to_radio = meshtastic.mesh_pb2.ToRadio(packet=mesh_packet)
-        print("sending ToRadio")
-        print(to_radio)
+
         self.mesh_writer.write(b"\x94\xc3" + struct.pack(">H", to_radio.ByteSize()) + to_radio.SerializeToString())
         self.packet_id = (self.packet_id + 1) % 2**32
         await self.mesh_writer.drain()
@@ -105,9 +109,7 @@ class RadioRx():
             # because the node doesn't just output packet data
             # it also outputs regular ascii debug info
             # which may overflow the buffer at some point
-            print("waiting for FromRadio!")
             packet = await self.read_packet()
-            print(packet)
             await self.handle_packet(packet)
 
 
@@ -141,10 +143,8 @@ class RadioRx():
 
 
         # all good at this point
-        print("packet is good, relaying to TUN")
-        written = 0
-        while written < len(packet.packet.decoded.payload):
-            written += await asyncio.to_thread(os.write, self.tun_fd, packet.packet.decoded.payload[written:])
+        print(f"[MESH -> TUN] {ip_info(packet.packet.decoded.payload)}")
+        await asyncio.to_thread(os.write, self.tun_fd, packet.packet.decoded.payload)
         
 
 async def main(loop):
